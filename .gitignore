@@ -172,3 +172,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+/api_token.py
+/abstracts.json
+/abstracts.md
+/reviewers.csv
+/reviewers.json
+/categorized_abstracts.json
+/categories.txt
