@@ -8,6 +8,10 @@ from collections import defaultdict
 # Constants from your original script
 TOPIC_MULTIPLIER = 1.2
 MINIMUM_MATCH_SCORE = 10
+MAX_ABSTRACTS_PER_REVIEWER = 30
+MIN_ABSTRACTS_PER_REVIEWER = 10
+REVIEWERS_PER_ABSTRACT = 3
+EXPERIENCE_THRESHOLD = 10  # years of experience
 
 def calculate_match(abstract, reviewer):
     """
@@ -24,12 +28,15 @@ def calculate_match(abstract, reviewer):
 
     # Check for matching categories
     for category, score in abstract['category_scores'].items():
-        if category in reviewer['categories']:
+        cats = [c.lower() for c in reviewer['categories']]
+        if category.lower() in cats:
             match_score += score
 
     # Apply focus topic multiplier
     if abstract['focus_topic'] in reviewer['focus_topic']:
         match_score *= TOPIC_MULTIPLIER
+
+    match_score *= reviewer['experience']  # Scale by experience (0-10 years)
 
     return match_score
 
@@ -46,8 +53,15 @@ def prepare_data(abstracts_file, reviewers_file):
 
     # Create lookup dictionaries
     abstract_dict = {abstract['number']: abstract for abstract in abstracts}
-    reviewer_dict = {(reviewer['first_name'], reviewer['last_name']): reviewer for reviewer in reviewers}
-    
+    reviewer_dict = {}
+    for reviewer in reviewers:
+        reviewer_key = (reviewer['first_name'], reviewer['last_name'])
+        if reviewer_key in reviewer_dict:
+            print("Duplicate reviewer found:", reviewer_key)
+        reviewer_dict[reviewer_key] = reviewer
+
+    print(len(reviewer_dict))
+
     # Add indices for easier referencing
     for i, reviewer_key in enumerate(reviewer_dict.keys()):
         reviewer_dict[reviewer_key]['index'] = i
@@ -75,7 +89,7 @@ def prepare_data(abstracts_file, reviewers_file):
     # Identify experienced reviewers (5+ years of experience)
     experienced_reviewers = []
     for reviewer_key, reviewer in reviewer_dict.items():
-        if reviewer.get('experience', 0) >= 5:
+        if reviewer.get('experience', 0) >= EXPERIENCE_THRESHOLD:
             experienced_reviewers.append(reviewer['index'])
             print("Reviewer", reviewer_key, "is experienced")
     
@@ -101,7 +115,7 @@ def prepare_data(abstracts_file, reviewers_file):
         'problematic_abstracts': problematic_abstracts
     }
 
-def optimize_assignments(data, reviewers_per_abstract=3, max_abstracts_per_reviewer=10):
+def optimize_assignments(data, reviewers_per_abstract=3, max_abstracts_per_reviewer=30, min_abstracts_per_reviewer=10):
     """
     Perform optimization to assign reviewers to abstracts.
     """
@@ -156,6 +170,10 @@ def optimize_assignments(data, reviewers_per_abstract=3, max_abstracts_per_revie
             x[reviewer_idx, abstract_num] 
             for abstract_num in relevant_abstracts
         ) <= max_abstracts_per_reviewer
+        model += pulp.lpSum(
+            x[reviewer_idx, abstract_num]
+            for abstract_num in relevant_abstracts
+        ) >= min_abstracts_per_reviewer
     
     # Constraint 3: Each abstract needs at least one experienced reviewer
     for abstract_num in abstract_numbers:
@@ -186,7 +204,7 @@ def optimize_assignments(data, reviewers_per_abstract=3, max_abstracts_per_revie
     
     return assignments
 
-def validate_and_fix_assignments(assignments, data, reviewers_per_abstract=3, max_abstracts_per_reviewer=10):
+def validate_and_fix_assignments(assignments, data, reviewers_per_abstract=3, max_abstracts_per_reviewer=30):
     """
     Validate the assignments and fix any issues.
     """
@@ -393,6 +411,7 @@ def report_statistics(assignments, data):
     print(f"Average match score: {sum(match_scores) / len(match_scores):.2f}")
     print(f"Min match score: {min(match_scores):.2f}")
     print(f"Max match score: {max(match_scores):.2f}")
+    return reviewer_loads
 
 def convert_to_output_format(assignments, data):
     """
@@ -403,7 +422,7 @@ def convert_to_output_format(assignments, data):
     # Create a reverse mapping from indices to reviewer names
     reviewer_names = {}
     for (first, last), reviewer in data['reviewers'].items():
-        reviewer_names[reviewer['index']] = f"{first} {last}"
+        reviewer_names[reviewer['index']] = (first,last)
     
     # Format each abstract's assignments
     for abstract_num, assigned_reviewers in sorted(assignments.items()):
@@ -434,10 +453,7 @@ def main():
     # Files with your data
     abstracts_file = 'categorized_abstracts.json'
     reviewers_file = 'reviewers.json'
-    
-    # Parameters
-    reviewers_per_abstract = 3
-    max_abstracts_per_reviewer = 30
+
     
     # Prepare data
     data = prepare_data(abstracts_file, reviewers_file)
@@ -446,28 +462,47 @@ def main():
     print("\nRunning assignment optimization...")
     assignments = optimize_assignments(
         data, 
-        reviewers_per_abstract=reviewers_per_abstract,
-        max_abstracts_per_reviewer=max_abstracts_per_reviewer
+        reviewers_per_abstract=REVIEWERS_PER_ABSTRACT,
+        max_abstracts_per_reviewer=MAX_ABSTRACTS_PER_REVIEWER,
+        min_abstracts_per_reviewer=MIN_ABSTRACTS_PER_REVIEWER
     )
     
     # Validate and fix assignments if needed
     fixed_assignments = validate_and_fix_assignments(
         assignments, 
         data, 
-        reviewers_per_abstract=reviewers_per_abstract,
-        max_abstracts_per_reviewer=max_abstracts_per_reviewer
+        reviewers_per_abstract=REVIEWERS_PER_ABSTRACT,
+        max_abstracts_per_reviewer=MAX_ABSTRACTS_PER_REVIEWER
     )
     
     # Report statistics
-    report_statistics(fixed_assignments, data)
-    
+    reviewer_loads = report_statistics(fixed_assignments, data)
+
+    reviewer_dict = data['reviewers']
+    idle_reviewers = []
+    assigned_reviewers = []
+    for reviewer_key, reviewer in reviewer_dict.items():
+        if reviewer['index'] in reviewer_loads:
+            assigned_reviewers.append({
+                'reviewer_key': reviewer_key,
+                'load': reviewer_loads[reviewer['index']]
+            })
+        else:
+            idle_reviewers.append(reviewer_key)
+
     # Convert to output format
     output_data = convert_to_output_format(fixed_assignments, data)
     
     # Save results
     with open('reviewer_assignments.json', 'w') as f:
         json.dump(output_data, f, indent=2)
-    
+
+    with open('reviewer_assignments_statistics.json', 'w') as f:
+        json.dump({
+            "assigned_reviewers": assigned_reviewers,
+            "idle_reviewers": idle_reviewers
+        }, f, indent=2)
+
     print("\nAssignments completed! Results saved to 'reviewer_assignments.json'")
 
 if __name__ == "__main__":
