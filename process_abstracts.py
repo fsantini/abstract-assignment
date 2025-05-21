@@ -1,6 +1,7 @@
 import json
 from typing import Dict, List, Any
 import anthropic
+import time
 
 from api_token import CLAUDE_API_KEY
 
@@ -37,7 +38,7 @@ def categorize_abstract(abstract: Dict[str, Any], categories: List[str]) -> Dict
     Abstract Text: {abstract.get('text', '')}
 
     Categories to rate (return ONLY these exact categories with their numerical scores):
-    {', '.join(categories)}
+    {'\n'.join(categories)}
 
     Please return your response as a JSON object with categories as keys and integer scores (0-10) as values. 
     No explanations, just the JSON object.
@@ -79,8 +80,14 @@ def process_abstracts(categories_file: str, abstracts_file: str, output_file: st
 
     results = []
 
+    last_time = 0
+    MIN_ABSTRACT_TIME = 0.1  # Minimum time between requests in seconds
+
     for i, abstract in enumerate(abstracts):
         print(f"Processing abstract {i + 1}/{len(abstracts)}: {abstract.get('title', '')}")
+        if time.time() - last_time < MIN_ABSTRACT_TIME:
+            time.sleep(MIN_ABSTRACT_TIME - (time.time() - last_time))
+        last_time = time.time()
 
         # Get category scores
         category_scores = categorize_abstract(abstract, categories)
