@@ -5,7 +5,7 @@ from tqdm import tqdm
 from unidecode import unidecode
 from collections import defaultdict
 
-# Constants from your original script
+# configuration
 TOPIC_MULTIPLIER = 1.2
 MINIMUM_MATCH_SCORE = 10
 MAX_ABSTRACTS_PER_REVIEWER = 30
