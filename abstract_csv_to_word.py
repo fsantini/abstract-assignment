@@ -8,6 +8,8 @@ from unidecode import unidecode
 from api_token import CLAUDE_API_KEY
 
 ABSTRACT_EXPORT = 'Export_ESMRMB_2025_Abstract_20250520_141544.csv'
+IMAGE_FOLDER = '/media/bigboy2/ESMRMB2025/image/'
+
 
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
@@ -139,13 +141,74 @@ def remove_parentheses(line):
 aff_cleanup_re = re.compile(r'^[0-9]+\.[\s,]*')
 multispace_cleanup_re = re.compile(r'\s+')
 
+fig_re = re.compile(r'^Fig(?:ure)?\.?\s*([0-9]+)\s*[:.]?\s*(.*)', re.IGNORECASE | re.MULTILINE)
+table_re = re.compile(r'^Tab(?:le)?\.?\s*([0-9]+)\s*[:.]?\s*(.*)', re.IGNORECASE | re.MULTILINE)
+def process_caption(caption: str):
+    """
+    Process a caption to extract figure/table number and description.
+
+    Args:
+        caption: The caption text to process
+
+    Returns:
+        Tuple containing (caption reference, cleaned caption)
+    """
+    fig_match = fig_re.match(caption)
+    table_match = table_re.match(caption)
+    if fig_match:
+        return f'Figure {fig_match.group(1)} ', fig_match.group(2).strip()
+    if table_match:
+        return f'Table {table_match.group(1)} ', table_match.group(2).strip()
+
+    print("Warning: Caption does not match expected format:", caption)
+    return '', caption.strip()
+
+
+def process_figure_field(field: str):
+    """
+    Process a field that may contain figure references.
+
+    Args:
+        field: The field to process
+
+    Returns:
+        Cleaned field with figure references removed
+    """
+    figure_file_re = re.compile(r'[0-9]{5}-[0-9]{6}-.*')
+    figures = []
+    caption_refs = []
+    captions = []
+    current_caption = None
+    for line in field.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if figure_file_re.match(line):
+            if current_caption is not None:
+                caption_ref, caption = process_caption(current_caption.strip())
+                caption_refs.append(caption_ref)
+                captions.append(caption)
+            current_caption = ''
+            figures.append(line)
+        else:
+            current_caption += line + '\n'
+    if field and not figures:
+        print("Error parsing figures in field:", field)
+    if current_caption is not None:
+        caption_ref, caption = process_caption(current_caption.strip())
+        caption_refs.append(caption_ref)
+        captions.append(caption)
+    return figures, caption_refs, captions
+
+
+
 with open(ABSTRACT_EXPORT, 'r', encoding='ISO-8859-15') as f:
     reader = csv.DictReader(f, delimiter=';', quotechar='"')
     abstracts = []
     row_number = 0
     for row in reader:
-        if row_number > 10:
-            break
+        #if row_number > 10:
+        #    break
         row_number += 1
 
         print(f"Processing row {row_number}: {row['Reference']} - {row['Titre']}")
@@ -154,6 +217,7 @@ with open(ABSTRACT_EXPORT, 'r', encoding='ISO-8859-15') as f:
             continue
         abstract = {}
         abstract['title'] = unidecode(row['Titre'])
+        abstract['reference'] = '#' + row['Reference']
 
         authors_line = re.sub(multispace_cleanup_re, ' ', unidecode(row['Auteurs']))
         authors_list = [unidecode(a.strip()) for a in authors_line.split(',')]
@@ -169,18 +233,109 @@ with open(ABSTRACT_EXPORT, 'r', encoding='ISO-8859-15') as f:
         # clean up affiliations
         abstract['affiliations'] = [re.sub(aff_cleanup_re, '', aff) for aff in affiliations if aff.strip()]
 
-
         abstract['introduction'] = unidecode(row['Résumé'])
         abstract['methods'] = unidecode(row['Methods'])
         abstract['results'] = unidecode(row['Results'])
         abstract['discussion'] = unidecode(row['Discussion'])
         abstract['conclusion'] = unidecode(row['Conclusion'])
         #refs = parse_refs(unidecode(row['Data and Code Availability Statement and References (Information not included in the word counting)']))
-        refs = {}
+        refs = {'Acknowledgments': unidecode(row['Data and Code Availability Statement and References (Information not included in the word counting)'])}
         abstract['acknowledgments'] = refs.get('Acknowledgments', '')
         abstract['data_and_code_availability'] = refs.get('Data and Code Availability Statement', '')
         abstract['references'] = refs.get('References', [])
+        abstract['figure_files'], abstract['figure_refs'], abstract['figure_captions'] = process_figure_field(unidecode(row['Figure']))
         abstracts.append(abstract)
 
         with open('abstracts_for_print.json', 'w', encoding='utf-8') as json_file:
             json.dump(abstracts, json_file, ensure_ascii=False, indent=4)
+
+# create doc file
+from docx import Document
+from docx.shared import Inches
+doc = Document()
+
+ABSTRACT_SUBSET = """45995
+46461
+47569
+47619
+47669
+47681
+47826
+47901""".splitlines()
+
+for abstract in abstracts:
+    if abstract['reference'][1:] not in ABSTRACT_SUBSET:
+        continue
+    title_par = doc.add_paragraph()
+    title_par.add_run(abstract['reference'] + ' \n' + abstract['title']).bold = True
+    authors_par = doc.add_paragraph('')
+    for i, (author_name, affiliations) in enumerate(abstract['authors']):
+        auth_run = authors_par.add_run(author_name)
+        if i == abstract['speaker']:
+            auth_run.underline = True
+        aff_run = authors_par.add_run(affiliations)
+        aff_run.font.superscript = True
+        if (i + 1) < len(abstract['authors']):
+            authors_par.add_run(', ')
+
+    affiliations_par = doc.add_paragraph('')
+    affiliations_par.italic = True
+    for i, aff in enumerate(abstract['affiliations']):
+        aff_run = affiliations_par.add_run(f'{i+1} {aff}').italic = True
+        if (i + 1) < len(abstract['affiliations']):
+            affiliations_par.add_run('\n')
+
+    p = doc.add_paragraph('')
+    p.add_run('Introduction: ').bold = True
+    p.add_run(abstract['introduction'])
+
+    p = doc.add_paragraph('')
+    p.add_run('Methods: ').bold = True
+    p.add_run(abstract['methods'])
+
+    p = doc.add_paragraph('')
+    p.add_run('Results: ').bold = True
+    p.add_run(abstract['results'])
+
+    p = doc.add_paragraph('')
+    p.add_run('Discussion: ').bold = True
+    p.add_run(abstract['discussion'])
+
+    p = doc.add_paragraph('')
+    p.add_run('Conclusion: ').bold = True
+    p.add_run(abstract['conclusion'])
+
+    if abstract['acknowledgments']:
+        p = doc.add_paragraph('')
+        p.add_run('Acknowledgments: ').bold = True
+        p.add_run(abstract['acknowledgments'])
+
+    if abstract['data_and_code_availability']:
+        p = doc.add_paragraph('')
+        p.add_run('Data and Code Availability: ').bold = True
+        p.add_run(abstract['data_and_code_availability'])
+
+    if abstract['figure_files']:
+        for f_num, figure in enumerate(abstract['figure_files']):
+            doc.add_picture(IMAGE_FOLDER + figure, width=Inches(5.0))
+            p = doc.add_paragraph('')
+            try:
+                if not abstract['figure_refs'][f_num]:
+                    p.add_run('Figure ' + str(f_num + 1) + ' ').bold = True
+                else:
+                    p.add_run(abstract['figure_refs'][f_num]).bold = True
+                p.add_run(abstract['figure_captions'][f_num])
+            except IndexError:
+                print('Warning: Figure caption not found for figure', f_num + 1)
+
+    if abstract['references']:
+        p = doc.add_paragraph('')
+        p.add_run('References:\n').bold = True
+        for i, ref in enumerate(abstract['references']):
+            ref_run = p.add_run(f'{i+1}. {ref}')
+            if i+1 < len(abstract['references']):
+                p.add_run('\n')
+
+
+doc.save('abstracts_for_print.docx')
+
