@@ -1,10 +1,14 @@
 import csv
 import json
 import re
+import os
 from typing import List, Dict, Tuple
 import anthropic
 
-from unidecode import unidecode
+#from unidecode import unidecode
+# Do not remove unicode characters, as they may be important for the text
+def unidecode(text: str) -> str:
+    return text
 from api_token import CLAUDE_API_KEY
 
 ABSTRACT_EXPORT = 'Export_ESMRMB_2025_Abstract_20250520_141544.csv'
@@ -35,6 +39,13 @@ Instructions:
 6. Do not modify or alter the original text - only organize it into the appropriate JSON fields
 7. Infer section membership based on content when headers are unclear
 
+Rules:
+1. Do not duplicate information across sections
+2. Return only valid JSON in the specified format
+3. Do not include any additional text or explanations outside the JSON structure
+4. Do not alter the original text in any way, just extract and organize it
+5. Make sure to properly escape double quotes and special characters in the JSON output
+
 Return ONLY valid JSON in this exact format:
 {{
     "Acknowledgments": "text or null",
@@ -59,6 +70,13 @@ def parse_refs(text: str):
         Dictionary with parsed sections
     """
     try:
+        if not text.strip():
+            return {
+                "Acknowledgments": None,
+                "Data and Code Availability Statement": None,
+                "References": [],
+                "error": "No text provided"
+            }
         prompt = create_parsing_prompt(text)
 
         message = client.messages.create(
@@ -79,16 +97,33 @@ def parse_refs(text: str):
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
-            return json.loads(json_str)
         else:
-            # Try to parse the entire response as JSON
-            return json.loads(response_text)
+            json_str = response_text.strip()
+
+        # try to catch unescaped quotes
+        json_sanitized = ''
+        for line in json_str.splitlines():
+            line = line.strip()
+            if line.startswith('"Acknowledgments"') or line.startswith('"Data and Code Availability Statement"') or line.startswith('"References"'):
+                json_sanitized += line + '\n'
+                continue
+            if line.startswith('"'): # reference line
+                sub_line = line[1:-2] # remove leading and trailing quotes, and, optionally, trailing comma
+                sub_line = re.sub(r'[^\\]"', r'\"', sub_line) # escape quotes
+                json_sanitized += line[0] + sub_line + line[-2:] + '\n'
+                continue
+
+            json_sanitized += line + '\n'
+
+        print("Sanitized JSON response:", json_sanitized)
+
+        return json.loads(json_sanitized)
 
     except json.JSONDecodeError as e:
         print(f"JSON parsing error: {e}")
         print(f"Response was: {response_text}")
         return {
-            "Acknowledgments": None,
+            "Acknowledgments": "PARSE FAILED",
             "Data and Code Availability Statement": None,
             "References": None,
             "error": f"JSON parsing failed: {str(e)}"
@@ -96,7 +131,7 @@ def parse_refs(text: str):
     except Exception as e:
         print(f"API or other error: {e}")
         return {
-            "Acknowledgments": None,
+            "Acknowledgments": "PARSE FAILED",
             "Data and Code Availability Statement": None,
             "References": None,
             "error": str(e)
@@ -200,142 +235,53 @@ def process_figure_field(field: str):
         captions.append(caption)
     return figures, caption_refs, captions
 
+if __name__ == "__main__":
+    with open(ABSTRACT_EXPORT, 'r', encoding='ISO-8859-15') as f:
+        reader = csv.DictReader(f, delimiter=';', quotechar='"')
+        abstracts = []
+        row_number = 0
+        for row in reader:
+            #if row_number > 10:
+            #    break
+            row_number += 1
 
+            print(f"Processing row {row_number}: {row['Reference']} - {row['Titre']}")
 
-with open(ABSTRACT_EXPORT, 'r', encoding='ISO-8859-15') as f:
-    reader = csv.DictReader(f, delimiter=';', quotechar='"')
-    abstracts = []
-    row_number = 0
-    for row in reader:
-        #if row_number > 10:
-        #    break
-        row_number += 1
+            if row['Statut'] != 'Reviewing Pending':
+                continue
+            abstract = {}
+            abstract['title'] = unidecode(row['Titre'])
+            abstract['reference'] = '#' + row['Reference']
 
-        print(f"Processing row {row_number}: {row['Reference']} - {row['Titre']}")
+            authors_line = re.sub(multispace_cleanup_re, ' ', unidecode(row['Auteurs']))
+            authors_list = [unidecode(a.strip()) for a in authors_line.split(',')]
+            abstract['authors'] = parse_author_list(authors_line)
+            speaker = unidecode(row['Orateur nom'].strip())
+            abstract['speaker'] = 0
+            for i, (author_name, affiliations) in enumerate(abstract['authors']):
+                if speaker.lower() in author_name.lower():
+                    abstract['speaker'] = i
+                    break
 
-        if row['Statut'] != 'Reviewing Pending':
-            continue
-        abstract = {}
-        abstract['title'] = unidecode(row['Titre'])
-        abstract['reference'] = '#' + row['Reference']
+            affiliations = unidecode(row['Affiliations']).splitlines()
+            # clean up affiliations
+            abstract['affiliations'] = [re.sub(aff_cleanup_re, '', aff) for aff in affiliations if aff.strip()]
 
-        authors_line = re.sub(multispace_cleanup_re, ' ', unidecode(row['Auteurs']))
-        authors_list = [unidecode(a.strip()) for a in authors_line.split(',')]
-        abstract['authors'] = parse_author_list(authors_line)
-        speaker = unidecode(row['Orateur nom'].strip())
-        abstract['speaker'] = 0
-        for i, (author_name, affiliations) in enumerate(abstract['authors']):
-            if speaker.lower() in author_name.lower():
-                abstract['speaker'] = i
-                break
+            abstract['introduction'] = unidecode(row['Résumé'])
+            abstract['methods'] = unidecode(row['Methods'])
+            abstract['results'] = unidecode(row['Results'])
+            abstract['discussion'] = unidecode(row['Discussion'])
+            abstract['conclusion'] = unidecode(row['Conclusion'])
+            abstract['original_availability'] = unidecode(row['Data and Code Availability Statement and References (Information not included in the word counting)'])
+            refs = parse_refs(abstract['original_availability'])
+            #refs = {'Acknowledgments': unidecode(row['Data and Code Availability Statement and References (Information not included in the word counting)'])}
+            abstract['acknowledgments'] = refs.get('Acknowledgments', '')
+            abstract['data_and_code_availability'] = refs.get('Data and Code Availability Statement', '')
+            abstract['references'] = refs.get('References', [])
+            abstract['figure_files'], abstract['figure_refs'], abstract['figure_captions'] = process_figure_field(unidecode(row['Figure']))
+            abstracts.append(abstract)
 
-        affiliations = unidecode(row['Affiliations']).splitlines()
-        # clean up affiliations
-        abstract['affiliations'] = [re.sub(aff_cleanup_re, '', aff) for aff in affiliations if aff.strip()]
+            with open('abstracts_for_print.json', 'w', encoding='utf-8') as json_file:
+                json.dump(abstracts, json_file, ensure_ascii=False, indent=4)
 
-        abstract['introduction'] = unidecode(row['Résumé'])
-        abstract['methods'] = unidecode(row['Methods'])
-        abstract['results'] = unidecode(row['Results'])
-        abstract['discussion'] = unidecode(row['Discussion'])
-        abstract['conclusion'] = unidecode(row['Conclusion'])
-        #refs = parse_refs(unidecode(row['Data and Code Availability Statement and References (Information not included in the word counting)']))
-        refs = {'Acknowledgments': unidecode(row['Data and Code Availability Statement and References (Information not included in the word counting)'])}
-        abstract['acknowledgments'] = refs.get('Acknowledgments', '')
-        abstract['data_and_code_availability'] = refs.get('Data and Code Availability Statement', '')
-        abstract['references'] = refs.get('References', [])
-        abstract['figure_files'], abstract['figure_refs'], abstract['figure_captions'] = process_figure_field(unidecode(row['Figure']))
-        abstracts.append(abstract)
-
-        with open('abstracts_for_print.json', 'w', encoding='utf-8') as json_file:
-            json.dump(abstracts, json_file, ensure_ascii=False, indent=4)
-
-# create doc file
-from docx import Document
-from docx.shared import Inches
-doc = Document()
-
-ABSTRACT_SUBSET = """45995
-46461
-47569
-47619
-47669
-47681
-47826
-47901""".splitlines()
-
-for abstract in abstracts:
-    if abstract['reference'][1:] not in ABSTRACT_SUBSET:
-        continue
-    title_par = doc.add_paragraph()
-    title_par.add_run(abstract['reference'] + ' \n' + abstract['title']).bold = True
-    authors_par = doc.add_paragraph('')
-    for i, (author_name, affiliations) in enumerate(abstract['authors']):
-        auth_run = authors_par.add_run(author_name)
-        if i == abstract['speaker']:
-            auth_run.underline = True
-        aff_run = authors_par.add_run(affiliations)
-        aff_run.font.superscript = True
-        if (i + 1) < len(abstract['authors']):
-            authors_par.add_run(', ')
-
-    affiliations_par = doc.add_paragraph('')
-    affiliations_par.italic = True
-    for i, aff in enumerate(abstract['affiliations']):
-        aff_run = affiliations_par.add_run(f'{i+1} {aff}').italic = True
-        if (i + 1) < len(abstract['affiliations']):
-            affiliations_par.add_run('\n')
-
-    p = doc.add_paragraph('')
-    p.add_run('Introduction: ').bold = True
-    p.add_run(abstract['introduction'])
-
-    p = doc.add_paragraph('')
-    p.add_run('Methods: ').bold = True
-    p.add_run(abstract['methods'])
-
-    p = doc.add_paragraph('')
-    p.add_run('Results: ').bold = True
-    p.add_run(abstract['results'])
-
-    p = doc.add_paragraph('')
-    p.add_run('Discussion: ').bold = True
-    p.add_run(abstract['discussion'])
-
-    p = doc.add_paragraph('')
-    p.add_run('Conclusion: ').bold = True
-    p.add_run(abstract['conclusion'])
-
-    if abstract['acknowledgments']:
-        p = doc.add_paragraph('')
-        p.add_run('Acknowledgments: ').bold = True
-        p.add_run(abstract['acknowledgments'])
-
-    if abstract['data_and_code_availability']:
-        p = doc.add_paragraph('')
-        p.add_run('Data and Code Availability: ').bold = True
-        p.add_run(abstract['data_and_code_availability'])
-
-    if abstract['figure_files']:
-        for f_num, figure in enumerate(abstract['figure_files']):
-            doc.add_picture(IMAGE_FOLDER + figure, width=Inches(5.0))
-            p = doc.add_paragraph('')
-            try:
-                if not abstract['figure_refs'][f_num]:
-                    p.add_run('Figure ' + str(f_num + 1) + ' ').bold = True
-                else:
-                    p.add_run(abstract['figure_refs'][f_num]).bold = True
-                p.add_run(abstract['figure_captions'][f_num])
-            except IndexError:
-                print('Warning: Figure caption not found for figure', f_num + 1)
-
-    if abstract['references']:
-        p = doc.add_paragraph('')
-        p.add_run('References:\n').bold = True
-        for i, ref in enumerate(abstract['references']):
-            ref_run = p.add_run(f'{i+1}. {ref}')
-            if i+1 < len(abstract['references']):
-                p.add_run('\n')
-
-
-doc.save('abstracts_for_print.docx')
 
