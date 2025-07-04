@@ -28,7 +28,7 @@ def crop_whitespace(img):
         return img.crop(bbox)
     return img
 
-with open('abstracts_for_print.json', 'r', encoding='utf-8') as f:
+with open('abstracts_merged.json', 'r', encoding='utf-8') as f:
     abstracts = json.load(f)
 
 doc = Document()
@@ -139,10 +139,6 @@ with open('assigned_sessions_final_cleaned.csv', 'r', encoding='utf-8') as f:
                 ref_run = p.add_run(f'{i+1}. {ref}')
                 if i+1 < len(abstract['references']):
                     p.add_run('\n')
-
-        if (abstract_number % 10) == 9:
-            print(f'Saving progress after {abstract_number+1} abstracts...')
-            doc.save(OUTPUT_FILE)
 
 doc.save(OUTPUT_FILE)
 
