@@ -1,5 +1,6 @@
 import json
 import csv
+from abstract_csv_to_json_print import parse_author_list
 
 def find_abstract_by_reference(abstracts, reference):
     for abstract in abstracts:
@@ -45,6 +46,17 @@ for abstract in abstracts_for_print:
     abstract['session_number'] = assignment_row['Session number']
     abstract['session_title'] = assignment_row['Session title']
     abstract['order_in_session'] = assignment_row['Order in Session']
+    authors_new = parse_author_list(exported_row['Auteurs'])
+    separated_authors = []
+    for (author, aff) in authors_new:
+        author = author.strip()
+        first_last = author.split('  ')
+        if len(first_last) == 2:
+            separated_authors.append((first_last[0], first_last[1]))
+        else:
+            separated_authors.append(('', author))
+    abstract['authors_separated'] = separated_authors
+
 
 
 with open('abstracts_merged.json', 'w', encoding='utf-8') as f:
